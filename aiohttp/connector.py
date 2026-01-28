@@ -129,11 +129,12 @@ class Connection:
 
     def __del__(self, _warnings: Any = warnings) -> None:
         if self._protocol is not None:
+            if self._loop.is_closed():
+                return
+
             _warnings.warn(
                 f"Unclosed connection {self!r}", ResourceWarning, source=self
             )
-            if self._loop.is_closed():
-                return
 
             self._connector._release(self._key, self._protocol, should_close=True)
 
@@ -332,6 +333,9 @@ class BaseConnector:
         conns = [repr(c) for c in self._conns.values()]
 
         self._close_immediately()
+
+        if self._loop.is_closed():
+            return
 
         _warnings.warn(f"Unclosed connector {self!r}", ResourceWarning, source=self)
         context = {

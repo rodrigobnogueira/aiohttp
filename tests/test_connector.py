@@ -188,9 +188,13 @@ def test_connection_del_loop_closed(loop: asyncio.AbstractEventLoop) -> None:
     loop.set_exception_handler(exc_handler)
     loop.close()
 
-    with pytest.warns(ResourceWarning):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
         del conn
         gc.collect()
+        assert not any(
+            issubclass(r.category, ResourceWarning) for r in w
+        ), "ResourceWarning was emitted"
 
     assert not connector._release.called
     assert not exc_handler.called
@@ -267,13 +271,17 @@ def test_del_with_closed_loop(  # type: ignore[misc]
     loop.set_exception_handler(exc_handler)
     loop.close()
 
-    with pytest.warns(ResourceWarning):
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
         del conn
         gc.collect()
+        assert not any(
+            issubclass(r.category, ResourceWarning) for r in w
+        ), "ResourceWarning was emitted"
 
     assert not conns_impl
     assert not transp.close.called
-    assert exc_handler.called
+    assert not exc_handler.called
 
 
 async def test_del_empty_connector(loop: asyncio.AbstractEventLoop) -> None:
