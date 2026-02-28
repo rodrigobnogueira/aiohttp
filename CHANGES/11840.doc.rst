@@ -1,0 +1,1 @@
+Added a dynamic router middleware example showing runtime route registration -- by :user:`rodrigobnogueira`.
