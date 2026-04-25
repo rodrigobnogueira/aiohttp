@@ -1,0 +1,238 @@
+name: Check Template
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-template:
+    name: Check Template
+    runs-on: ubuntu-latest
+    # Skip bots (dependabot, pre-commit-ci, etc.)
+    if: >-
+      github.event.pull_request.user.type != 'Bot'
+      && github.event.issue.user.type != 'Bot'
+    steps:
+      - name: Validate submission against template
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const isIssue = !!context.payload.issue && !context.payload.pull_request;
+            const isPR = !!context.payload.pull_request;
+            const item = isPR ? context.payload.pull_request : context.payload.issue;
+            const body = (item.body || '').trim();
+            const itemNumber = isPR
+              ? context.payload.pull_request.number
+              : context.payload.issue.number;
+
+            let problems = [];
+
+            if (isIssue) {
+              // --- Bug report (Issue Forms YAML) validation ---
+              // GitHub Issue Forms render `textarea` fields with `render: console`
+              // as fenced code blocks. An unfilled field looks like:
+              //
+              //   ### Python Version
+              //
+              //   ```console
+              //   $ python --version
+              //   ```
+              //
+              // A properly filled field has extra lines between the command and
+              // the closing fence:
+              //
+              //   ### Python Version
+              //
+              //   ```console
+              //   $ python --version
+              //   Python 3.12.13
+              //   ```
+              //
+              // We detect the unfilled pattern: heading → code block with ONLY
+              // the default command and nothing else before the closing fence.
+
+              const versionChecks = [
+                {
+                  name: 'Python Version',
+                  regex: /### Python Version\s*```console\s*\$ python --version\s*```/,
+                },
+                {
+                  name: 'aiohttp Version',
+                  regex: /### aiohttp Version\s*```console\s*\$ python -m pip show aiohttp\s*```/,
+                },
+                {
+                  name: 'multidict Version',
+                  regex: /### multidict Version\s*```console\s*\$ python -m pip show multidict\s*```/,
+                },
+                {
+                  name: 'propcache Version',
+                  regex: /### propcache Version\s*```console\s*\$ python -m pip show propcache\s*```/,
+                },
+                {
+                  name: 'yarl Version',
+                  regex: /### yarl Version\s*```console\s*\$ python -m pip show yarl\s*```/,
+                },
+              ];
+
+              for (const { name, regex } of versionChecks) {
+                if (regex.test(body)) {
+                  problems.push(
+                    `The **${name}** field still contains only the default ` +
+                    `placeholder command. Please paste the actual output.`
+                  );
+                }
+              }
+
+              // Check for the required textarea sections being completely empty.
+              // GitHub Issue Forms mark required textareas, but users can still
+              // type a single space or whitespace-only content to bypass the
+              // form validation. Detect headings followed immediately by the
+              // next heading with nothing in between.
+              const requiredSections = [
+                'Describe the bug',
+                'To Reproduce',
+                'Expected behavior',
+              ];
+              for (const section of requiredSections) {
+                const emptyPattern = new RegExp(
+                  `### ${section}\\s*(?:###|$)`
+                );
+                if (emptyPattern.test(body)) {
+                  problems.push(
+                    `The **${section}** section appears to be empty. ` +
+                    `Please provide the requested information.`
+                  );
+                }
+              }
+
+              // --- Legacy markdown template (ISSUE_TEMPLATE.md) validation ---
+              // Some users may still use the old markdown template. Check if the
+              // "Long story short" section is left blank.
+              const oldTemplateBlank =
+                /## Long story short\s*(?:<!--[\s\S]*?-->\s*)*## Expected behaviour/;
+              if (oldTemplateBlank.test(body)) {
+                problems.push(
+                  'The **Long story short** section is empty. ' +
+                  'Please describe your problem.'
+                );
+              }
+            } else if (isPR) {
+              // --- Pull Request template validation ---
+
+              if (!body) {
+                problems.push(
+                  'The PR description is completely empty. ' +
+                  'Please use the provided PR template.'
+                );
+              } else {
+                // Check that the template sections are present
+                if (!body.includes('## What do these changes do?')) {
+                  problems.push(
+                    'The PR description is missing the ' +
+                    '"What do these changes do?" section from the template.'
+                  );
+                }
+                if (!body.includes('## Checklist')) {
+                  problems.push(
+                    'The PR description is missing the ' +
+                    '"Checklist" section from the template.'
+                  );
+                }
+
+                // Check for completely blank "What do these changes do?" section.
+                // The template has:
+                //   ## What do these changes do?
+                //
+                //   <!-- Please give a short brief about these changes. -->
+                //
+                //   ## Are there changes in behavior for the user?
+                //
+                // If the user didn't write anything, the comment is immediately
+                // followed by the next section heading.
+                const emptyBrief =
+                  /## What do these changes do\?\s*(?:<!--[\s\S]*?-->\s*)*## Are there changes in behavior for the user\?/;
+                if (emptyBrief.test(body)) {
+                  problems.push(
+                    'The **What do these changes do?** section is blank. ' +
+                    'Please describe your changes.'
+                  );
+                }
+              }
+            }
+
+            if (problems.length === 0) {
+              core.info('Template validation passed.');
+              return;
+            }
+
+            // Build the comment message
+            const itemType = isIssue ? 'issue' : 'pull request';
+            const lines = [
+              `👋 Thanks for your submission!`,
+              ``,
+              `However, it looks like the ${itemType} description does not ` +
+              `fully follow the expected template:`,
+              ``,
+              ...problems.map(p => `- ${p}`),
+              ``,
+              `Please update the description to address the above and ` +
+              `reopen the ${itemType}.`,
+            ];
+            const message = lines.join('\n');
+
+            // Avoid duplicate comments: check if we already posted one
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: itemNumber,
+            });
+            const botLogin = 'github-actions[bot]';
+            const alreadyCommented = comments.data.some(
+              c => c.user.login === botLogin
+                && c.body.includes('does not fully follow the expected template')
+            );
+
+            if (!alreadyCommented) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: itemNumber,
+                body: message,
+              });
+            } else {
+              // Update the existing comment instead
+              const existing = comments.data.find(
+                c => c.user.login === botLogin
+                  && c.body.includes('does not fully follow the expected template')
+              );
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: message,
+              });
+            }
+
+            // Close the issue/PR
+            if (isIssue && item.state === 'open') {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: itemNumber,
+                state: 'closed',
+                state_reason: 'not_planned',
+              });
+            } else if (isPR && item.state === 'open') {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: itemNumber,
+                state: 'closed',
+              });
+            }
